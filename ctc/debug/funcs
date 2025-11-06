@@ -1,0 +1,236 @@
+#!/bin/bash
+
+# 1) run "debug_env {local,dev} tmp/key"
+# 2) setup running docker images if needed for local mode
+# 3) run "debug_test 10"
+
+function setup_env {
+export debug_mode=$1
+export debug_key=$2
+
+mkdir -p ${debug_key}
+
+export PREFECT_LOG_LEVEL="DEBUG"
+
+if [ ${debug_mode} == "local" ]; then
+
+    export PREFECT_API_URL="http://127.0.0.1:4200/api"
+    export PREFECT_API_DATABASE_CONNECTION_URL="postgresql+asyncpg://postgres:xxxx@localhost:5432/prefect"
+
+    export PREFECT_REDIS_EVENTS_HOST="redis"
+    export PREFECT_REDIS_MESSAGING_HOST="redis"
+    export PREFECT_REDIS_EVENTS_PORT="6579"
+    export PREFECT_REDIS_MESSAGING_PORT="6579"
+    export PREFECT_REDIS_EVENTS_SSL="false"
+    export PREFECT_REDIS_MESSAGING_SSL="false"
+
+    export PREFECT_EVENTS_BROKER="prefect_redis.messaging"
+    export PREFECT_MESSAGING_BROKER="prefect_redis.messaging"
+    export PREFECT_EVENTS_CACHE="prefect_redis.messaging"
+    export PREFECT_MESSAGING_CACHE="prefect_redis.messaging"
+    export PREFECT_REDIS_EVENTS_DB="0"
+    export PREFECT_REDIS_MESSAGING_DB="0"
+
+    export PREFECT_SERVER_EVENTS_CAUSAL_ORDERING="prefect_redis.ordering"
+    export PREFECT_SERVER_CONCURRENCY_LEASE_STORAGE="prefect_redis.lease_storage"
+
+    export PREFECT_REDIS_LOCK_MANAGER="prefect_redis.lock"
+
+elif [ ${debug_mode} == "dev" ]; then
+
+    source ctc/debug/secrets
+
+    export PREFECT_API_URL="https://prefect-reseng-dev.chicagotrading.io/api"
+    export PREFECT_API_DATABASE_CONNECTION_URL=${RESENG_DEV_PSQL_CONNECTION_STRING}
+
+else
+    echo bad mode setting
+    exit
+fi
+}
+
+function _run_bg {
+x=$1
+shift
+uv run $@ > ${debug_key}/$x.log 2>&1
+}
+
+function run_test {
+set -x
+
+nruns=${1:-"10"}
+
+echo starting viz...
+_run_bg 1 prefect event stream &
+l1=$!
+echo pid is $l1 for stream 2
+sleep 1
+
+_run_bg 2 prefect event stream &
+l2=$!
+echo pid is $l2 for stream 2
+sleep 1
+
+echo testing...
+_run_bg test pytest --flake-finder --flake-runs=$nruns integration-tests/test_concurrent_subflows.py &
+ltest=$!
+echo pid is $ltest for test
+
+echo waiting for test to finish...
+wait $ltest
+
+echo sleep a few more seconds...
+sleep 5
+
+for x in $l1 $l2; do
+    echo killing pid $x...
+    kill -9 $x
+done
+
+wait
+
+echo all background tasks done
+set +x
+}
+
+# some docker stuff
+# docker network create mynet
+
+alias docker=podman
+alias dps="docker ps"
+alias dpsa="docker ps -a"
+alias dlogs="docker logs"
+
+function dsr {
+docker stop $1
+docker rm $1
+}
+
+# this is the setup for redis
+function setup_local_redis {
+docker run \
+    --name redis \
+    --network mynet \
+    --cap-add NET_ADMIN \
+    -p 6579:6379 \
+    -d \
+    redis/redis-stack:latest
+}
+
+# this is the setup for postgres
+function setup_local_postgres {
+docker run \
+    --name postgres \
+    --network mynet \
+    --cap-add NET_ADMIN \
+    -e POSTGRES_PASSWORD=xxxx \
+    -p 5432:5432 \
+    -v pgdata:/var/lib/postgresql/data \
+    -d \
+    postgres
+}
+
+# docker exec -it postgres sh -c 'tc qdisc add dev lo root netem delay 100ms 50ms'
+#
+# test it...
+# docker exec -it postgres sh -c 'psql -h 127.0.0.1 -p 5432 -U postgres postgres -c "\timing" -c "SELECT 1"'
+# should give 100+ms, not 5-10ms
+#
+# psql -h localhost -p 5432 -U postgres -c 'create database prefect;'
+# psql -h prefect-reseng-ncus-psql-prod.postgres.database.azure.com -p 5432 -U pgadmin -d prefect
+# psql -h prefect-reseng-ncus-psql-dev.postgres.database.azure.com -p 5432 -U pgadmin -d prefect
+
+# also, we can put prefect in a docker container, uv run prefect build-image, then
+function _setup_local_prefect {
+#image=prefecthq/prefect-dev:sha-87e4967-python3.13
+#image=prefecthq/prefect-dev:sha-7cfd1c3-python3.11
+image=prefecthq/prefect-dev:sha-7047948-python3.11
+
+name=$1
+shift
+
+if [ $name = "ps" ]; then
+    forward="-p 4200:4200"
+else
+    forward=""
+fi
+
+docker run \
+    --name $name \
+    --network mynet \
+    --cap-add NET_ADMIN \
+    -e PREFECT_API_DATABASE_CONNECTION_URL="postgresql+asyncpg://postgres:xxxx@postgres:5432/prefect" \
+    -e PREFECT_SERVER_LOGGING_LEVEL="DEBUG" \
+    -e PREFECT_LOGGING_LEVEL="DEBUG" \
+    -e PREFECT_LOGGING_EXTRA_LOGGERS="[\"prefect.engine\",\"prefect.events\"]" \
+    -e PREFECT_EVENTS_BROKER="prefect_redis.messaging" \
+    -e PREFECT_MESSAGING_BROKER="prefect_redis.messaging" \
+    -e PREFECT_EVENTS_CACHE="prefect_redis.messaging" \
+    -e PREFECT_MESSAGING_CACHE="prefect_redis.messaging" \
+    -e PREFECT_REDIS_EVENTS_DB="0" \
+    -e PREFECT_REDIS_MESSAGING_DB="0" \
+    -e PREFECT_SERVER_EVENTS_CAUSAL_ORDERING="prefect_redis.ordering" \
+    -e PREFECT_SERVER_CONCURRENCY_LEASE_STORAGE="prefect_redis.lease_storage" \
+    -e PREFECT_REDIS_LOCK_MANAGER="prefect_redis.lock" \
+    -e PREFECT_REDIS_EVENTS_HOST="redis" \
+    -e PREFECT_REDIS_MESSAGING_HOST="redis" \
+    -e PREFECT_REDIS_EVENTS_PORT="6379" \
+    -e PREFECT_REDIS_MESSAGING_PORT="6379" \
+    -e PREFECT_REDIS_EVENTS_SSL="false" \
+    -e PREFECT_REDIS_MESSAGING_SSL="false" \
+    -e PREFECT_API_URL="http://ch12ldnix005.chicagotrading.com:4200/api" \
+    -v /home/conrade/prefect:/home/conrade/prefect \
+    $forward \
+    -d \
+    $image \
+    $@
+}
+
+function setup_local_prefect {
+    _setup_local_prefect ps prefect server start --log-level DEBUG --host 0.0.0.0 --port 4200 --no-services
+    _setup_local_prefect px prefect server services start
+    sleep 5
+    _setup_local_prefect pw prefect worker start --pool "local"
+}
+
+
+# prep for delay, loss, tbf
+function setup_local_netprep {
+for x in postgres ps; do
+docker exec -it $x sh -c 'apt update && apt-get install -y iproute2'
+done
+}
+
+# or some delay plus loss
+function add_local_qdisc {
+for x in postgres ps; do
+    loss=${1:-"1"}
+    lat0=${2:-"100"}
+    lat1=${3:-"50"}
+    docker exec -it $x sh -c 'tc qdisc del dev lo root'
+    docker exec -it $x sh -c "tc qdisc add dev lo root netem loss ${loss}% delay ${lat0}ms ${lat1}ms"
+done
+}
+
+# or add in some buffer/burst
+function add_local_tbf {
+for x in postgres ps; do
+    rate=${1:-"500k"}
+    brst=${2:-"32k"}
+    lat=${3:-"300"}
+    docker exec -it $x sh -c 'tc qdisc del dev lo root'
+    docker exec -it $x sh -c "tc qdisc add dev lo root tbf rate ${rate}bit burst ${brst}bit latency ${lat}ms"
+done
+}
+
+function show_local_qdisc {
+for x in postgres ps; do
+    docker exec -it $x sh -c 'tc qdisc show'
+done
+}
+
+function del_local_qdisc {
+for x in postgres ps; do
+docker exec -it $x sh -c 'tc qdisc del dev lo root'
+done
+}
