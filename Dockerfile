@@ -1,5 +1,5 @@
 # The version of Python in the final image
-ARG PYTHON_VERSION=3.9
+ARG PYTHON_VERSION=3.11
 # The base image to use for the final image; Prefect and its Python requirements will
 # be installed in this image. The default is the official Python slim image.
 # The following images are also available in this file:
@@ -7,9 +7,9 @@ ARG PYTHON_VERSION=3.9
 # Any image tag can be used, but it must have apt and pip.
 ARG BASE_IMAGE=python:${PYTHON_VERSION}-slim
 # The version used to build the Python distributable.
-ARG BUILD_PYTHON_VERSION=3.9
+ARG BUILD_PYTHON_VERSION=3.11
 # THe version used to build the UI distributable.
-ARG NODE_VERSION=18.18.0
+ARG NODE_VERSION=20.19.0
 # Any extra Python requirements to install
 ARG EXTRA_PIP_PACKAGES=""
 
@@ -116,7 +116,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN uv pip uninstall setuptools
 
 # Install any extra packages
-ARG EXTRA_PIP_PACKAGES
+ARG EXTRA_PIP_PACKAGES=prefect_redis
 RUN --mount=type=cache,target=/root/.cache/uv \
     [ -z "${EXTRA_PIP_PACKAGES:-""}" ] || uv pip install "${EXTRA_PIP_PACKAGES}"
 
