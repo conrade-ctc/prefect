@@ -248,6 +248,10 @@ def build_image(
             "Defaults to the standard Python base image"
         ),
     ),
+    extra_pip_packages: str = typer.Option(
+        None,
+        help="This will pass EXTRA_PIP_PACKAGES into the docker build process",
+    ),
     dry_run: bool = False,
 ):
     """
@@ -279,6 +283,9 @@ def build_image(
 
     if flavor:
         command += ["--build-arg", f"BASE_IMAGE=prefect-{flavor}"]
+
+    if extra_pip_packages:
+        command += ["--build-arg", f"EXTRA_PIP_PACKAGES={extra_pip_packages}"]
 
     if dry_run:
         print(" ".join(command))
